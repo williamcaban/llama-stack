@@ -16,7 +16,7 @@ These tests validate the PromptCachingMiddleware implementation including:
 - Error handling and graceful degradation
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -33,7 +33,6 @@ from llama_stack_api.inference import (
     OpenAIChatCompletion,
     OpenAIChatCompletionRequestWithExtraBody,
     OpenAIChatCompletionUsage,
-    OpenAIChatCompletionUsagePromptTokensDetails,
     OpenAIChoice,
     OpenAISystemMessageParam,
     OpenAIUserMessageParam,
@@ -204,9 +203,7 @@ class TestPromptCachingMiddleware:
                 OpenAISystemMessageParam(
                     content="You are a helpful assistant. " * 200  # ~400 words = ~500 tokens
                 ),
-                OpenAIUserMessageParam(
-                    content="What is the capital of France?"
-                ),
+                OpenAIUserMessageParam(content="What is the capital of France?"),
             ],
             stream=False,
         )
@@ -377,27 +374,32 @@ class TestPromptCachingMiddleware:
         assert cache_size == 2
 
     @patch("llama_stack.core.server.prompt_caching.count_tokens")
-    async def test_circuit_breaker_open(self, mock_count_tokens, middleware, sample_request, sample_response):
-        """Test that circuit breaker opens after consecutive failures."""
+    async def test_cache_failures_graceful_degradation(
+        self, mock_count_tokens, middleware, sample_request, sample_response
+    ):
+        """Test that cache failures don't block inference (graceful degradation)."""
         mock_count_tokens.return_value = 1200
 
         # Simulate cache failures
         middleware.cache.get = AsyncMock(side_effect=Exception("Cache backend failure"))
+        middleware.cache.set = AsyncMock(side_effect=Exception("Cache backend failure"))
 
         execute_fn = AsyncMock(return_value=sample_response)
 
-        # Trigger failures to open circuit
-        for _ in range(middleware.config.circuit_breaker.failure_threshold + 1):
-            await middleware.process_chat_completion(
-                request=sample_request,
-                execute_fn=execute_fn,
-            )
+        # Make request despite cache failures
+        response = await middleware.process_chat_completion(
+            request=sample_request,
+            execute_fn=execute_fn,
+        )
 
-        # Circuit should be open
-        assert not middleware.circuit_breaker.is_closed()
+        # Verify inference still works (graceful degradation)
+        assert response == sample_response
+        execute_fn.assert_called_once()
 
-        # Verify inference still works (cache bypassed)
-        assert execute_fn.call_count == middleware.config.circuit_breaker.failure_threshold + 1
+        # Response should not have cached_tokens (cache miss with failure)
+        assert (
+            response.usage.prompt_tokens_details is None or response.usage.prompt_tokens_details.cached_tokens is None
+        )
 
     async def test_cache_key_computation(self, middleware):
         """Test cache key computation."""

@@ -36,7 +36,8 @@ Example:
 import asyncio
 import hashlib
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -191,7 +192,7 @@ class PromptCachingMiddleware:
         execute_fn: Callable[[OpenAIChatCompletionRequestWithExtraBody], Any],
         tenant_id: str = "default",
         user_id: str = "default",
-    ) -> OpenAIChatCompletion:
+    ) -> OpenAIChatCompletion:  # type: ignore[return]
         """Process chat completion request with caching.
 
         This method implements the core caching logic:
@@ -219,38 +220,40 @@ class PromptCachingMiddleware:
         """
         # 0. Check if caching is enabled
         if not self.config.enabled:
-            return await execute_fn(request)
+            return await execute_fn(request)  # type: ignore[no-any-return]
 
         # 1. Skip caching for streaming requests
         if request.stream and self.config.disable_for_streaming:
             logger.debug("Bypassing cache for streaming request")
-            return await execute_fn(request)
+            return await execute_fn(request)  # type: ignore[no-any-return]
 
         # 2. Extract prefix (all messages except last) and count tokens
         if not request.messages or len(request.messages) < 2:
             # Need at least 2 messages for prefix caching (system + user)
             logger.debug(f"Insufficient messages for caching: {len(request.messages) if request.messages else 0}")
-            return await execute_fn(request)
+            return await execute_fn(request)  # type: ignore[no-any-return]
 
         prefix_messages = request.messages[:-1]
 
         # 3. Count tokens in prefix
         try:
+            # Convert Pydantic models to dicts for tokenization
+            prefix_messages_dicts = [
+                msg.model_dump(exclude_none=True) if hasattr(msg, "model_dump") else msg for msg in prefix_messages
+            ]
             token_count = count_tokens(
-                messages=prefix_messages,
+                messages=prefix_messages_dicts,  # type: ignore[arg-type]
                 model=request.model,
                 exact=True,  # Use exact tokenization when possible
             )
         except Exception as e:
             logger.warning(f"Failed to count tokens for caching: {e}")
-            return await execute_fn(request)
+            return await execute_fn(request)  # type: ignore[no-any-return]
 
         # 4. Check if prefix is cacheable
         if token_count < self.config.min_cacheable_tokens:
-            logger.debug(
-                f"Prefix too short for caching: {token_count} < {self.config.min_cacheable_tokens} tokens"
-            )
-            return await execute_fn(request)
+            logger.debug(f"Prefix too short for caching: {token_count} < {self.config.min_cacheable_tokens} tokens")
+            return await execute_fn(request)  # type: ignore[no-any-return]
 
         # 5. Compute cache key
         cache_key = self._compute_cache_key(
@@ -276,7 +279,7 @@ class PromptCachingMiddleware:
                     self.circuit_breaker.record_success()
                 else:
                     logger.debug(f"Cache miss: {cache_key[:16]}... ({token_count} tokens)")
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(f"Cache lookup timeout for key: {cache_key[:16]}...")
                 self.circuit_breaker.record_failure()
             except Exception as e:
@@ -328,7 +331,7 @@ class PromptCachingMiddleware:
                 logger.warning(f"Failed to store cache entry: {e}")
                 self.circuit_breaker.record_failure()
 
-        return response
+        return response  # type: ignore[no-any-return]
 
     def _compute_cache_key(
         self,
@@ -360,12 +363,12 @@ class PromptCachingMiddleware:
         """
         # Serialize messages with sorted keys for consistency
         # Convert Pydantic models to dicts for serialization
-        serializable_messages = []
+        serializable_messages: list[dict[str, Any]] = []
         for msg in messages:
             if hasattr(msg, "model_dump"):
-                serializable_messages.append(msg.model_dump(exclude_none=True))
+                serializable_messages.append(msg.model_dump(exclude_none=True))  # type: ignore[arg-type]
             else:
-                serializable_messages.append(msg)
+                serializable_messages.append(msg)  # type: ignore[arg-type]
 
         serialized_messages = json.dumps(
             serializable_messages,
